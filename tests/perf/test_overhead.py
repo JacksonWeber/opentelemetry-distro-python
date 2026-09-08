@@ -23,142 +23,70 @@ Two pairs of scenarios are measured:
 
 from __future__ import annotations
 
-import logging
-
 import pytest
 
-_FAKE_CONNECTION_STRING = (
-    "InstrumentationKey=00000000-0000-0000-0000-000000000000;"
-    "IngestionEndpoint=https://localhost/;"
-    "LiveEndpoint=https://localhost/"
-)
-
-_AZURE_MONITOR_LOGGER_NAME = "perf.azure_monitor_log"
-_OTEL_LOGGER_NAME = "perf.otel_log"
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture(scope="session")
-def _azure_monitor_configured() -> None:
-    """Call ``configure_azure_monitor`` once per pytest session with all
-    network-facing features disabled so the benchmark measures only the
-    in-process hot path."""
-    from microsoft.opentelemetry._azure_monitor._configure import configure_azure_monitor
-
-    configure_azure_monitor(
-        connection_string=_FAKE_CONNECTION_STRING,
-        disable_metrics=True,
-        enable_live_metrics=False,
-        enable_performance_counters=False,
-        disable_offline_storage=True,
-        logger_name=_AZURE_MONITOR_LOGGER_NAME,
-    )
+from perf_tools.scenarios import SCENARIOS, create_managed_operation
 
 
 @pytest.fixture
-def azure_monitor_tracer(_azure_monitor_configured):
-    from opentelemetry import trace
-
-    return trace.get_tracer("perf.azure_monitor_span")
-
-
-@pytest.fixture
-def azure_monitor_logger(_azure_monitor_configured):
-    logger = logging.getLogger(_AZURE_MONITOR_LOGGER_NAME)
-    logger.setLevel(logging.INFO)
-    # Don't let records propagate to the root logger, which may have handlers
-    # installed by other tests in the session.
-    logger.propagate = False
-    return logger
+def azure_monitor_span_operation():
+    managed = create_managed_operation("azure_monitor_span")
+    try:
+        yield managed.operation
+    finally:
+        managed.shutdown()
 
 
 @pytest.fixture
-def otel_tracer():
-    # Build our own provider rather than touching the global TracerProvider so
-    # this reference benchmark is insulated from `configure_azure_monitor`
-    # being called by other tests in the same session.
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
-
-    provider = TracerProvider()
-    provider.add_span_processor(BatchSpanProcessor(InMemorySpanExporter()))
-    return provider.get_tracer("perf.otel_span")
+def azure_monitor_log_operation():
+    managed = create_managed_operation("azure_monitor_log")
+    try:
+        yield managed.operation
+    finally:
+        managed.shutdown()
 
 
 @pytest.fixture
-def otel_logger():
-    from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
-    from opentelemetry.sdk._logs.export import BatchLogRecordProcessor, InMemoryLogExporter
-
-    provider = LoggerProvider()
-    provider.add_log_record_processor(BatchLogRecordProcessor(InMemoryLogExporter()))
-    handler = LoggingHandler(level=logging.INFO, logger_provider=provider)
-    logger = logging.getLogger(_OTEL_LOGGER_NAME)
-    logger.setLevel(logging.INFO)
-    # Isolate from any handlers attached to ancestor loggers (e.g. the root
-    # logger if Azure Monitor was configured earlier in the session) so this
-    # reference benchmark measures only the local handler/provider.
-    logger.propagate = False
-    if not any(isinstance(h, LoggingHandler) for h in logger.handlers):
-        logger.addHandler(handler)
-    return logger
+def otel_span_operation():
+    managed = create_managed_operation("otel_span")
+    try:
+        yield managed.operation
+    finally:
+        managed.shutdown()
 
 
-def _mark_gating(benchmark, gating: bool) -> None:
-    benchmark.extra_info["gating"] = gating
+@pytest.fixture
+def otel_log_operation():
+    managed = create_managed_operation("otel_log")
+    try:
+        yield managed.operation
+    finally:
+        managed.shutdown()
 
 
-# ---------------------------------------------------------------------------
-# Benchmarks
-# ---------------------------------------------------------------------------
+def _mark_gating(benchmark, case: str) -> None:
+    benchmark.extra_info["gating"] = SCENARIOS[case].gating
 
 
 @pytest.mark.benchmark(group="span")
-def test_azure_monitor_span(benchmark, azure_monitor_tracer):
-    _mark_gating(benchmark, True)
-    tracer = azure_monitor_tracer
-
-    def _op() -> None:
-        with tracer.start_as_current_span("bench") as span:
-            span.set_attribute("bench.attr", 1)
-
-    benchmark(_op)
+def test_azure_monitor_span(benchmark, azure_monitor_span_operation):
+    _mark_gating(benchmark, "azure_monitor_span")
+    benchmark(azure_monitor_span_operation)
 
 
 @pytest.mark.benchmark(group="log")
-def test_azure_monitor_log(benchmark, azure_monitor_logger):
-    _mark_gating(benchmark, True)
-    logger = azure_monitor_logger
-
-    def _op() -> None:
-        logger.info("bench message %s", 1)
-
-    benchmark(_op)
+def test_azure_monitor_log(benchmark, azure_monitor_log_operation):
+    _mark_gating(benchmark, "azure_monitor_log")
+    benchmark(azure_monitor_log_operation)
 
 
 @pytest.mark.benchmark(group="span")
-def test_otel_span(benchmark, otel_tracer):
-    _mark_gating(benchmark, False)
-    tracer = otel_tracer
-
-    def _op() -> None:
-        with tracer.start_as_current_span("bench") as span:
-            span.set_attribute("bench.attr", 1)
-
-    benchmark(_op)
+def test_otel_span(benchmark, otel_span_operation):
+    _mark_gating(benchmark, "otel_span")
+    benchmark(otel_span_operation)
 
 
 @pytest.mark.benchmark(group="log")
-def test_otel_log(benchmark, otel_logger):
-    _mark_gating(benchmark, False)
-    logger = otel_logger
-
-    def _op() -> None:
-        logger.info("bench message %s", 1)
-
-    benchmark(_op)
+def test_otel_log(benchmark, otel_log_operation):
+    _mark_gating(benchmark, "otel_log")
+    benchmark(otel_log_operation)
